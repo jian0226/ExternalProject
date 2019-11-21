@@ -1,0 +1,109 @@
+---
+title: "Untitled"
+author: "Fiona"
+date: "11/20/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F,warning = F,message = F,dpi = 500)
+pacman::p_load(tidyverse,corrplot,readxl,glmnet)
+```
+
+# Read the NAV Data
+```{r}
+nav <- read.csv("~/Desktop/ExternalProject/SPHIX-2.csv")
+```
+
+# Clean the NAV Data
+```{r}
+nav = nav %>% select(Date,Adj.Close) %>% 
+  mutate(price = as.numeric(Adj.Close)) %>% 
+  mutate(Date = as.Date(Date,"%Y-%m-%d"))
+plot(x = nav$Date,y = nav$Adj.Close,type ="l")
+```
+
+# Read the Index Data
+```{r}
+sheet = excel_sheets("~/Desktop/ExternalProject/Indices.xlsx")
+c = setNames(sheet,paste0("Index",1:length(sheet)))
+
+re = function(x){
+  a = read_excel("Indices.xlsx",sheet=x) %>% data.frame
+  names = colnames(a)
+  names[1] = "Date"
+  colnames(a) = names
+  a = a %>% mutate(Date = as.Date(Date,"%Y-%m-%d"))
+  a[names[2]] = as.numeric(a[,2])
+  return(a)
+}
+
+list2env(lapply(c,function(x){re(x)}),envir = .GlobalEnv)
+```
+
+# Merge all the Index together
+```{r}
+index = Index1
+for(i in 2:17){
+  index = inner_join(index, get(paste0("Index",i)), by = "Date")
+}
+
+index.t = index %>% dplyr::select(-Date) %>% 
+  apply(MARGIN =2, function(x){(x-min(x,na.rm = T))/(max(x,na.rm = T)-min(x,na.rm = T))*100})
+index.t = data.frame(index.t)
+index.t = index.t %>% mutate(Date = index$Date)
+index.p = index.t %>% pivot_longer(cols = 1:17, names_to = "Name", values_to = "Index")
+
+ggplot(index.p) +geom_line(aes(x= Date, y = Index, color = Name))
+
+da = index %>% select(-Date) %>% drop_na()
+library(corrplot)
+cor.in = cor(da)
+corrplot(cor.in,method = "circle",type = "upper",diag = F)
+```
+
+# combine NAV data and Index data and calculate Log.Return
+```{r}
+log.return = function(x){
+  log.return = diff(log(x),lag = 1)*100
+  return(log.return)
+}
+
+data.tot = inner_join(nav,index,by = "Date")
+logre = apply(data.tot[,2:ncol(data.tot)], MARGIN = 2,log.return) %>% data.frame()
+data = logre %>% mutate(Date = data.tot$Date[2:length(data.tot$Date)]) %>% data.frame()
+str(data)
+# GFSI is an index contains negtive value, so use original value instead of log.return
+data = data %>% mutate(GFSI.Index = index$GFSI.Index[2:length(data.tot$Date)])
+str(data)
+```
+
+#Visualize Log.Return
+```{r}
+# Rearrange Data
+data.l = data %>% pivot_longer(cols = 1:(ncol(data)-1),names_to = "Index_NAV",values_to = "Log.Return")
+ggplot(data.l) + geom_line(aes(y = Log.Return,x = Date,color = Index_NAV))
+cor = cor(data[,1:(ncol(data)-1)])
+corrplot(cor,method = "circle",type = "upper",diag = F)
+```
+
+# Implement Lasso Regression
+```{r}
+x = data %>% select(-c(Date,Adj.Close)) %>% as.matrix()
+y = data$Adj.Close %>% as.matrix()
+lambda_seq = 10^seq(10, -10, by = -.1)
+
+library(glmnet)
+cv_output <- cv.glmnet(x = x, y = y, alpha = 1, lambda = lambda_seq)
+plot(cv_output)
+best_lam <- cv_output$lambda.min
+
+lasso_best <- glmnet(x = x, y = y, alpha = 1, lambda = best_lam)
+pred = predict(lasso_best, s = best_lam, newx = x)
+
+ssr = sum((pred - y)^2)
+sst = sum((y - mean(y))^2)
+R2 = 1 - ssr/sst
+
+coef(lasso_best)
+```
